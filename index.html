@@ -349,8 +349,6 @@
 </div>
 
 <script>
-const SYSTEM_PROMPT = "You are FunkinHelper, an assistant specialized in Friday Night Funkin' source code: the base Haxe/HaxeFlixel/Lime/OpenFL game, and its major engine forks (Psych Engine, V-Slice/Codename Engine, Kade Engine, Forever Engine, and mobile ports of these). You understand HScript and Lua modding APIs used across these engines, JSON chart formats, native extensions, and Android/iOS build toolchains (Gradle, hxcpp, CI via GitHub Actions). Give direct, technically precise help: fix bugs, explain engine internals, write new features, or convert scripts between Lua and HScript. All code you write must be in English, contain no comments, and must never use trace() calls. Keep prose explanations concise and focused on the fix or the concept, not padding.";
-
 const log = document.getElementById('log');
 const empty = document.getElementById('empty');
 const chips = document.getElementById('chips');
@@ -420,28 +418,20 @@ async function sendMessage(text) {
   addThinking();
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1000,
-        system: SYSTEM_PROMPT,
-        messages: messages
-      })
+      body: JSON.stringify({ messages })
     });
 
     const data = await response.json();
     removeThinking();
 
-    const textBlocks = (data.content || []).filter(b => b.type === 'text').map(b => b.text);
-    const reply = textBlocks.join('\n').trim();
-
-    if (!reply) {
-      addMessage('error', 'No response came back. Try rephrasing your question.');
+    if (!response.ok || !data.reply) {
+      addMessage('error', data.error || 'No response came back. Try rephrasing your question.');
     } else {
-      addMessage('ai', reply);
-      messages.push({ role: 'assistant', content: reply });
+      addMessage('ai', data.reply);
+      messages.push({ role: 'assistant', content: data.reply });
     }
   } catch (err) {
     removeThinking();
