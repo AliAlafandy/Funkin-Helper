@@ -161,7 +161,30 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+    position: relative;
   }
+
+  .scroll-bottom {
+    display: none;
+    position: absolute;
+    right: 28px;
+    bottom: 108px;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    color: var(--text);
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.35);
+    z-index: 10;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+
+  .scroll-bottom:hover { border-color: var(--purple); transform: translateY(-2px); }
+  .scroll-bottom.visible { display: flex; }
 
   .highway {
     height: 6px;
@@ -445,6 +468,57 @@
 
   .body em { color: var(--text-dim); font-style: italic; }
 
+  .code-wrap { position: relative; }
+
+  .code-copy {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    padding: 4px 9px;
+    border-radius: 6px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .code-wrap:hover .code-copy { opacity: 1; }
+  .code-copy:hover { color: var(--text); border-color: var(--purple); }
+  .code-copy:focus-visible { opacity: 1; outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+  .msg-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
+  }
+
+  .msg.user .msg-meta { justify-content: flex-end; }
+
+  .timestamp {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    color: var(--text-dim);
+  }
+
+  .copy-btn {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 5px;
+    border-radius: 6px;
+    transition: color 0.15s ease, background 0.15s ease;
+  }
+
+  .copy-btn:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+  .copy-btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
   .cursor {
     display: inline-block;
     margin-left: 1px;
@@ -578,6 +652,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .highway, .lane, .vs-fill, .cursor, .msg.enter { animation: none; }
+    .scroll-bottom, .code-copy { transition: none; }
   }
 </style>
 </head>
@@ -589,7 +664,7 @@
       <div class="mini-mark"><span></span><span></span><span></span><span></span></div>
       <span class="sidebar-brand">FunkinHelper</span>
     </div>
-    <button class="new-chat" id="newChatBtn">+ Nova conversa</button>
+    <button class="new-chat" id="newChatBtn">+ New chat</button>
     <div class="sidebar-list" id="sidebarList"></div>
   </aside>
 
@@ -626,6 +701,10 @@
       </div>
     </main>
 
+    <button class="scroll-bottom" id="scrollBottomBtn" aria-label="Scroll to latest message">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>
+    </button>
+
     <div class="composer">
       <div class="composer-inner">
         <button class="attach" id="attachBtn" aria-label="Attach a code file for analysis">
@@ -661,6 +740,7 @@ const fileInput = document.getElementById('fileInput');
 
 let currentConversationId = null;
 let busy = false;
+const BASE_TITLE = document.title;
 
 function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -674,14 +754,26 @@ function renderContent(text) {
     html += escapeHtml(plain).replace(/`([^`]+)`/g, '<code>$1</code>');
     const code = parts[i + 2];
     if (code !== undefined) {
-      html += '<pre><code>' + escapeHtml(code.trim()) + '</code></pre>';
+      html += '<div class="code-wrap"><button class="code-copy" type="button">Copy</button><pre><code>' + escapeHtml(code.trim()) + '</code></pre></div>';
     }
   }
   return html;
 }
 
+function formatTime(iso) {
+  try {
+    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+
 function scrollToBottom() {
   chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+function isNearBottom() {
+  return chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight < 120;
 }
 
 function avatarHtml(role) {
@@ -692,9 +784,29 @@ function avatarHtml(role) {
   return '<span></span><span></span><span></span><span></span>';
 }
 
-function addMessage(role, text, animate) {
+function addMeta(bubble, text, timestamp) {
+  bubble.dataset.raw = text;
+  const meta = document.createElement('div');
+  meta.className = 'msg-meta';
+
+  const time = document.createElement('span');
+  time.className = 'timestamp';
+  time.textContent = formatTime(timestamp);
+
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'copy-btn';
+  copyBtn.type = 'button';
+  copyBtn.textContent = 'Copy';
+
+  meta.appendChild(time);
+  meta.appendChild(copyBtn);
+  bubble.appendChild(meta);
+}
+
+function addMessage(role, text, animate, timestamp) {
   empty.style.display = 'none';
   const shouldAnimate = animate !== false;
+  const ts = timestamp || new Date().toISOString();
 
   const wrapper = document.createElement('div');
   wrapper.className = 'msg ' + role + (shouldAnimate ? ' enter' : '');
@@ -716,6 +828,7 @@ function addMessage(role, text, animate) {
 
   bubble.appendChild(label);
   bubble.appendChild(body);
+  if (role !== 'error') addMeta(bubble, text, ts);
   wrapper.appendChild(avatar);
   wrapper.appendChild(bubble);
   log.appendChild(wrapper);
@@ -750,7 +863,7 @@ function addStreamingMessage() {
   wrapper.appendChild(bubble);
   log.appendChild(wrapper);
   scrollToBottom();
-  return body;
+  return { body, bubble };
 }
 
 function addThinking() {
@@ -822,7 +935,7 @@ async function loadConversation(id) {
     empty.style.display = 'flex';
   } else {
     empty.style.display = 'none';
-    data.conversation.messages.forEach(m => addMessage(m.role, m.content, false));
+    data.conversation.messages.forEach(m => addMessage(m.role, m.content, false, m.createdAt));
   }
 
   refreshSidebar();
@@ -869,7 +982,8 @@ async function sendMessage(text) {
       return;
     }
 
-    const bodyEl = addStreamingMessage();
+    document.title = 'FunkinHelper · typing…';
+    const { body: bodyEl, bubble } = addStreamingMessage();
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let raw = '';
@@ -877,12 +991,14 @@ async function sendMessage(text) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      const wasNearBottom = isNearBottom();
       raw += decoder.decode(value, { stream: true });
       bodyEl.innerHTML = escapeHtml(raw) + '<span class="cursor">▍</span>';
-      scrollToBottom();
+      if (wasNearBottom) scrollToBottom();
     }
 
     bodyEl.innerHTML = renderContent(raw) || '<em>No response.</em>';
+    addMeta(bubble, raw, new Date().toISOString());
     refreshSidebar();
   } catch (err) {
     removeThinking();
@@ -891,6 +1007,7 @@ async function sendMessage(text) {
     busy = false;
     sendBtn.disabled = false;
     input.disabled = false;
+    document.title = BASE_TITLE;
     input.focus();
   }
 }
@@ -904,6 +1021,7 @@ async function analyzeFile(file) {
   try {
     addMessage('user', 'Uploaded file for analysis: ' + file.name);
     addThinking();
+    document.title = 'FunkinHelper · analyzing…';
 
     const formData = new FormData();
     formData.append('file', file);
@@ -925,6 +1043,7 @@ async function analyzeFile(file) {
     busy = false;
     sendBtn.disabled = false;
     input.disabled = false;
+    document.title = BASE_TITLE;
     fileInput.value = '';
   }
 }
@@ -953,6 +1072,46 @@ sidebarToggle.addEventListener('click', () => appShell.classList.toggle('sidebar
 
 attachBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', () => analyzeFile(fileInput.files[0]));
+
+const scrollBottomBtn = document.getElementById('scrollBottomBtn');
+
+chatArea.addEventListener('scroll', () => {
+  const farFromBottom = chatArea.scrollHeight - chatArea.scrollTop - chatArea.clientHeight > 160;
+  scrollBottomBtn.classList.toggle('visible', farFromBottom && log.children.length > 0);
+});
+
+scrollBottomBtn.addEventListener('click', () => {
+  chatArea.scrollTo({ top: chatArea.scrollHeight, behavior: 'smooth' });
+});
+
+log.addEventListener('click', async (e) => {
+  const codeBtn = e.target.closest('.code-copy');
+  if (codeBtn) {
+    const code = codeBtn.parentElement.querySelector('code');
+    try {
+      await navigator.clipboard.writeText(code.textContent);
+      codeBtn.textContent = 'Copied';
+      setTimeout(() => { codeBtn.textContent = 'Copy'; }, 1500);
+    } catch (err) {
+      codeBtn.textContent = 'Failed';
+      setTimeout(() => { codeBtn.textContent = 'Copy'; }, 1500);
+    }
+    return;
+  }
+
+  const copyBtn = e.target.closest('.copy-btn');
+  if (copyBtn) {
+    const bubble = copyBtn.closest('.bubble');
+    try {
+      await navigator.clipboard.writeText(bubble.dataset.raw || '');
+      copyBtn.textContent = 'Copied';
+      setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+    } catch (err) {
+      copyBtn.textContent = 'Failed';
+      setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+    }
+  }
+});
 
 window.addEventListener('DOMContentLoaded', async () => {
   const res = await fetch(API_BASE + '/api/conversations');
