@@ -35,7 +35,7 @@ export async function createConversation() {
   const data = await ensureLoaded();
   const id = randomUUID();
   const now = new Date().toISOString();
-  data[id] = { id, title: 'Nova conversa', messages: [], createdAt: now, updatedAt: now };
+  data[id] = { id, title: 'New conversation', messages: [], createdAt: now, updatedAt: now };
   await persist();
   return data[id];
 }
@@ -55,9 +55,10 @@ export async function appendMessage(id, message) {
   const data = await ensureLoaded();
   const conv = data[id];
   if (!conv) return null;
-  conv.messages.push(message);
-  conv.updatedAt = new Date().toISOString();
-  if (conv.title === 'Nova conversa' && message.role === 'user') {
+  const stamped = { ...message, createdAt: new Date().toISOString() };
+  conv.messages.push(stamped);
+  conv.updatedAt = stamped.createdAt;
+  if (conv.title === 'New conversation' && message.role === 'user') {
     const trimmed = message.content.slice(0, 48).trim();
     conv.title = trimmed + (message.content.length > 48 ? '…' : '');
   }
