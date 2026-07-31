@@ -7,10 +7,13 @@ import rateLimit from 'express-rate-limit';
 import { fileURLToPath } from 'url';
 import {
   listConversations,
+  searchConversations,
   createConversation,
   getConversation,
   deleteConversation,
-  appendMessage
+  setEngine,
+  appendMessage,
+  truncateFrom
 } from './store.js';
 
 dotenv.config();
@@ -21,9 +24,17 @@ const PORT = process.env.PORT || 3000;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-5';
 
-const CHAT_SYSTEM_PROMPT = "You are FunkinHelper, an assistant specialized in Friday Night Funkin' source code: the base Haxe/HaxeFlixel/Lime/OpenFL game, and its major engine forks (Psych Engine, V-Slice/Codename Engine, Kade Engine, Forever Engine, and mobile ports of these). You understand HScript and Lua modding APIs used across these engines, JSON chart formats, native extensions, and Android/iOS build toolchains (Gradle, hxcpp, CI via GitHub Actions). Give direct, technically precise help: fix bugs, explain engine internals, write new features, or convert scripts between Lua and HScript. All code you write must be in English, contain no comments, and must never use trace() calls. Keep prose explanations concise and focused on the fix or the concept, not padding.";
+const CHAT_SYSTEM_PROMPT = "You are FunkinHelper, an assistant specialized in Friday Night Funkin' source code: the base Haxe/HaxeFlixel/Lime/OpenFL game, and its major engine forks. You understand HScript and Lua modding APIs used across these engines, JSON chart formats, native extensions, and Android/iOS build toolchains (Gradle, hxcpp, CI via GitHub Actions). Give direct, technically precise help: fix bugs, explain engine internals, write new features, or convert scripts between Lua and HScript. All code you write must be in English, contain no comments, and must never use trace() calls. Keep prose explanations concise and focused on the fix or the concept, not padding.";
 
 const ANALYZE_SYSTEM_PROMPT = "You are FunkinHelper reviewing a single source file from a Friday Night Funkin' project (engine, mod, or tooling code, typically Haxe, HScript, or Lua). Identify real bugs, risky patterns, and concrete improvements. Reference specific lines or symbols from the file. Be direct and avoid generic advice that does not apply to this exact file. All code you suggest must be in English, contain no comments, and must never use trace() calls.";
+
+const ENGINE_CONTEXT = {
+  psych: "The user is working specifically with Psych Engine. Favor its HScript conventions, its Note/Character/Stage classes, and its typical folder and mod structure.",
+  vslice: "The user is working specifically with V-Slice / Codename Engine. Favor its ScriptedSong and scripted Character system, its module-based HScript scripting, and its Flixel state structure.",
+  kade: "The user is working specifically with Kade Engine. Favor its Lua/HScript hybrid modding conventions and its Options/Controls system.",
+  forever: "The user is working specifically with Forever Engine. Favor its scripting API and conventions.",
+  auto: ''
+};
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 300 * 1024 } });
 
@@ -48,6 +59,13 @@ app.get('/api/conversations', async (req, res) => {
   res.json({ conversations });
 });
 
+app.get('/api/conversations/search', async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (!q) return res.json({ conversations: await listConversations() });
+  const conversations = await searchConversations(q);
+  res.json({ conversations });
+});
+
 app.post('/api/conversations', async (req, res) => {
   const conversation = await createConversation();
   res.json({ conversation });
@@ -59,9 +77,21 @@ app.get('/api/conversations/:id', async (req, res) => {
   res.json({ conversation });
 });
 
+app.patch('/api/conversations/:id', async (req, res) => {
+  const conversation = await setEngine(req.params.id, req.body.engine);
+  if (!conversation) return res.status(404).json({ error: 'Conversation not found.' });
+  res.json({ conversation });
+});
+
 app.delete('/api/conversations/:id', async (req, res) => {
   await deleteConversation(req.params.id);
   res.json({ ok: true });
+});
+
+app.delete('/api/conversations/:id/messages/:messageId', async (req, res) => {
+  const conversation = await truncateFrom(req.params.id, req.params.messageId);
+  if (!conversation) return res.status(404).json({ error: 'Conversation not found.' });
+  res.json({ conversation });
 });
 
 app.post('/api/chat', apiLimiter, async (req, res) => {
@@ -69,7 +99,7 @@ app.post('/api/chat', apiLimiter, async (req, res) => {
     return res.status(500).json({ error: 'Server is missing ANTHROPIC_API_KEY.' });
   }
 
-  const { conversationId, message } = req.body;
+  const { conversationId, message, messageId, engine } = req.body;
 
   if (!conversationId || !message) {
     return res.status(400).json({ error: 'conversationId and message are required.' });
@@ -80,12 +110,19 @@ app.post('/api/chat', apiLimiter, async (req, res) => {
     return res.status(404).json({ error: 'Conversation not found.' });
   }
 
-  await appendMessage(conversationId, { role: 'user', content: message });
+  const effectiveEngine = engine || conversation.engine || 'auto';
+  if (effectiveEngine !== conversation.engine) {
+    await setEngine(conversationId, effectiveEngine);
+  }
+
+  await appendMessage(conversationId, { id: messageId, role: 'user', content: message });
 
   const upstreamMessages = [...conversation.messages, { role: 'user', content: message }].map(m => ({
     role: m.role,
     content: m.content
   }));
+
+  const systemPrompt = CHAT_SYSTEM_PROMPT + (ENGINE_CONTEXT[effectiveEngine] ? ' ' + ENGINE_CONTEXT[effectiveEngine] : '');
 
   try {
     const upstream = await fetch('https://api.anthropic.com/v1/messages', {
@@ -98,7 +135,7 @@ app.post('/api/chat', apiLimiter, async (req, res) => {
       body: JSON.stringify({
         model: MODEL,
         max_tokens: 2000,
-        system: CHAT_SYSTEM_PROMPT,
+        system: systemPrompt,
         stream: true,
         messages: upstreamMessages
       })
@@ -109,7 +146,7 @@ app.post('/api/chat', apiLimiter, async (req, res) => {
       return res.status(upstream.status || 500).json({ error: errData.error?.message || 'Anthropic API error.' });
     }
 
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
 
     const reader = upstream.body.getReader();
@@ -133,7 +170,7 @@ app.post('/api/chat', apiLimiter, async (req, res) => {
           const event = JSON.parse(payload);
           if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
             fullText += event.delta.text;
-            res.write(event.delta.text);
+            res.write(JSON.stringify({ type: 'delta', text: event.delta.text }) + '\n');
           }
         } catch {
           continue;
@@ -141,8 +178,10 @@ app.post('/api/chat', apiLimiter, async (req, res) => {
       }
     }
 
+    const updatedConversation = await appendMessage(conversationId, { role: 'assistant', content: fullText });
+    const assistantMessageId = updatedConversation.messages[updatedConversation.messages.length - 1].id;
+    res.write(JSON.stringify({ type: 'done', assistantMessageId }) + '\n');
     res.end();
-    await appendMessage(conversationId, { role: 'assistant', content: fullText });
   } catch (err) {
     if (!res.headersSent) {
       res.status(500).json({ error: 'Failed to reach the Anthropic API.' });
